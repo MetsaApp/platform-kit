@@ -3,7 +3,8 @@
 Shared Go module for services on the platform. The `runtime` package
 implements the runtime contract once, so a service's `main` is: load the
 runtime, register readiness checks, serve. The `natsclient` package is the
-NATS client every service shares.
+NATS client every service shares, and `edgeauth` verifies the identity guard
+hands every authenticated request.
 
 ```go
 ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -51,7 +52,12 @@ exported over OTLP gRPC only when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
 These names are the contract's and carry no prefix. Anything else is
 namespaced: a service prefixes its own settings with its name (`LIVE_...`,
 `BILLING_...`) and parses them itself, and any variable this module adds
-beyond the contract starts with `PLATFORM_KIT_`.
+beyond the contract starts with `PLATFORM_KIT_`:
+
+| Variable | Read by | |
+|---|---|---|
+| `PLATFORM_KIT_EDGEAUTH_JWKS_URL` | `edgeauth.Config.JWKSURL` | default `http://guard.guard-production.svc.cluster.local:8082/jwks.json` |
+| `PLATFORM_KIT_EDGEAUTH_AUDIENCES` | `edgeauth.Config.Audiences` | required by `edgeauth.New`: the hosts the app serves, comma-separated |
 
 Logs are JSON on stderr with `service`, `environment` and, when logged with a
 `*Context` method inside a span, `trace_id` and `span_id`. Use `rt.Logger`;
@@ -140,6 +146,114 @@ nothing is wrapped.
   a server span.
 - Metrics are `nats_requests_total{service,endpoint,outcome}` and
   `nats_request_duration_seconds` with the same labels.
+
+## edgeauth
+
+Guard is the only OIDC relying party on the platform. It sends every
+authenticated request upstream with a short-lived identity JWT in the
+`x-bastion-identity` header, and `edgeauth` verifies it, so an app never runs
+OIDC and never trusts a plain header. A token is accepted when:
+
+- the JOSE header is `alg: ES256`, `typ: bastion-id+jwt` and a `kid` in
+  guard's JWKS, and the signature verifies;
+- `iss` is `bastion` and `aud` is one of `Config.Audiences`;
+- `exp` has not passed and `iat` is not in the future, each with 10 s leeway,
+  and `sub` is set.
+
+The JWKS is fetched on the first token, never at start, cached for 5 minutes,
+and refetched for an unknown `kid` at most once every 30 seconds (concurrent
+requests share one fetch). An app boots and serves anonymous traffic while
+guard is down.
+
+| Request | `Middleware` |
+|---|---|
+| no header | passes on anonymous: `FromContext` reports false |
+| valid token | passes on with the `Identity` in the context |
+| invalid token (`ErrInvalid`) | 401, logged through `WithLogger` |
+| JWKS unreachable (`ErrUnavailable`) | 503 |
+
+Responses are plain text and never echo the token. `RequireIdentity` (401
+when anonymous) and `RequireRole(roles...)` (any of; 401 anonymous, 403
+without a role) go on the handlers that need a caller; they are the app's
+second fail-closed check after guard's own. Domain authorization stays in the
+app.
+
+```go
+cfg, err := edgeauth.ConfigFromEnv()           // PLATFORM_KIT_EDGEAUTH_*
+if err != nil { ... }
+v, err := edgeauth.New(cfg, edgeauth.WithLogger(rt.Logger))
+if err != nil { ... }
+
+mux := http.NewServeMux()
+mux.Handle("GET /", publicHandler)
+mux.Handle("GET /me", edgeauth.RequireIdentity(meHandler))
+mux.Handle("/admin/", edgeauth.RequireRole("admin")(adminHandler))
+err = rt.Serve(ctx, v.Middleware(mux))
+
+// in a handler
+id, ok := edgeauth.FromContext(r.Context())   // id.Subject, id.Roles, id.HasRole("admin")
+```
+
+With echo:
+
+```go
+e.Use(echo.WrapMiddleware(v.Middleware))
+admin := e.Group("/admin", echo.WrapMiddleware(edgeauth.RequireRole("admin")))
+```
+
+Tests mint identities with `edgeauthtest`, which signs with a throwaway key
+and serves its JWKS on an `httptest` server closed at the end of the test:
+
+```go
+iss := edgeauthtest.NewIssuer(t)
+v, err := edgeauth.New(iss.Config("live.metsa.app"))
+
+req := httptest.NewRequest(http.MethodGet, "https://live.metsa.app/admin", nil)
+iss.Sign(req, edgeauth.Identity{Subject: "u1", Roles: []string{"admin"}}) // aud = req.Host
+
+expired := iss.MintWith(id, "live.metsa.app", func(c *edgeauthtest.Claims) { c.Expiry -= 600 })
+```
+
+A handler test that does not care about tokens puts the identity in the
+context directly with `edgeauth.ContextWith`.
+
+`edgeauth/testdata/vectors.json` holds conformance vectors: a JWKS, a fixed
+`now`, and tokens with the identity or the error class (`invalid`,
+`unavailable`) each must give. The Go and TypeScript tests and guard's signer
+test run them; `go generate ./edgeauth` rewrites them, and a test fails when
+the committed file is stale.
+
+### TypeScript
+
+`@metsaapp/edgeauth` (`ts/edgeauth/`) applies the same rules on top of
+[jose](https://github.com/panva/jose). It is installed from this repository
+by tag; there is no registry:
+
+```
+bun add @metsaapp/edgeauth@github:MetsaApp/platform-kit#v0.3.0
+npm install @metsaapp/edgeauth@github:MetsaApp/platform-kit#v0.3.0
+```
+
+```ts
+import { createVerifier, EdgeAuthInvalid, EdgeAuthUnavailable } from "@metsaapp/edgeauth";
+
+const verifier = createVerifier({ audiences: ["umami.metsa.app"] }); // jwksUrl defaults as in Go
+const id = await verifier.fromHeaders(request.headers); // null when anonymous
+// rejects with EdgeAuthInvalid (answer 401) or EdgeAuthUnavailable (503)
+```
+
+The package's `package.json` is at the repository root, with `files` limited
+to `ts/edgeauth`. Bun imports the TypeScript source (the `bun` export
+condition); Node and bundlers import the compiled `ts/edgeauth/dist`, which is
+committed, because git installs do not run a build reliably (Bun and pnpm skip
+lifecycle scripts of git dependencies). CI fails when `dist` does not match
+the source. release-please bumps the root `package.json` version with each
+release.
+
+```
+cd ts/edgeauth && npm ci
+npm run build && npm run typecheck && npm test   # commit dist/ with the source
+```
 
 ## Working here
 

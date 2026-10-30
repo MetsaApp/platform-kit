@@ -1,3 +1,6 @@
 # macOS AppleDouble junk
 ._*
 .DS_Store
+
+# ts/edgeauth's dev dependencies
+node_modules/

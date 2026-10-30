@@ -1,0 +1,34 @@
+{
+  "name": "@metsaapp/edgeauth",
+  "version": "0.2.0",
+  "private": false,
+  "description": "Verifies guard's identity JWT (x-bastion-identity); the TypeScript twin of github.com/MetsaApp/platform-kit/edgeauth.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MetsaApp/platform-kit.git",
+    "directory": "ts/edgeauth"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "bun": "./ts/edgeauth/src/index.ts",
+      "types": "./ts/edgeauth/dist/index.d.ts",
+      "default": "./ts/edgeauth/dist/index.js"
+    }
+  },
+  "main": "./ts/edgeauth/dist/index.js",
+  "types": "./ts/edgeauth/dist/index.d.ts",
+  "files": [
+    "ts/edgeauth/src/index.ts",
+    "ts/edgeauth/dist/index.js",
+    "ts/edgeauth/dist/index.d.ts"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "jose": "^6.2.14"
+  }
+}

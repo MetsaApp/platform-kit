@@ -38,3 +38,32 @@ jobs:
       - uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
           version: v2.11.3
+
+  # ts/edgeauth: the TypeScript verifier apps install from this repository.
+  # dist/ is committed (git installs run no build), so CI checks it matches
+  # the source, then runs the shared vectors under Node and under Bun.
+  edgeauth-ts:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ts/edgeauth
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Install
+        run: npm ci
+      - name: Check, build and test
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run typecheck
+          npm run build
+          git diff --exit-code -- dist || { echo "ts/edgeauth/dist is stale: run npm run build and commit it"; exit 1; }
+          npm test
+          bun --bun x vitest run
