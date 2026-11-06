@@ -1,6 +1,7 @@
 package runtime_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -71,6 +72,13 @@ func childMain() int {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /config", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(rt.Config) //nolint:musttag // Test-only dump; Config is not a wire type.
+		})
+		// /hold answers its headers at once, then stays in flight until the
+		// client hangs up: a request the drain must wait for.
+		mux.HandleFunc("GET /hold", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_ = http.NewResponseController(w).Flush()
+			<-r.Context().Done()
 		})
 		mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
 			spanCtx, span := otel.Tracer("child").Start(r.Context(), "work")
@@ -224,12 +232,17 @@ func TestWorkerServesNoTrafficPort(t *testing.T) {
 func TestNotReadyWhileDraining(t *testing.T) {
 	child := startChild(t, nil)
 
-	// A request still in flight holds the drain open.
+	// A request still in flight holds the drain open. Its headers have come
+	// back, so the server is running it before SIGTERM arrives; a connection
+	// the server has not accepted yet would not hold the drain.
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(t.Context(), "tcp", "127.0.0.1:"+strconv.Itoa(runtime.HTTPPort))
 	require.NoError(t, err)
-	_, err = conn.Write([]byte("GET /config HTTP/1.1\r\nHost: x\r\n"))
+	_, err = conn.Write([]byte("GET /hold HTTP/1.1\r\nHost: x\r\n\r\n"))
 	require.NoError(t, err)
+	status, err := bufio.NewReader(conn).ReadString('\n')
+	require.NoError(t, err)
+	require.Contains(t, status, "200")
 
 	require.NoError(t, child.cmd.Process.Signal(syscall.SIGTERM))
 	assert.Eventually(t, func() bool {
@@ -238,7 +251,9 @@ func TestNotReadyWhileDraining(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 
 	require.NoError(t, conn.Close())
-	child.stop(t)
+	// Already signalled: a second SIGTERM after the child's handler is gone
+	// would kill it.
+	child.wait(t)
 }
 
 type child struct {
@@ -276,6 +291,14 @@ func (c *child) stop(t *testing.T) {
 	t.Helper()
 	c.once.Do(func() {
 		require.NoError(t, c.cmd.Process.Signal(syscall.SIGTERM))
+		require.NoError(t, c.cmd.Wait(), "child stderr: %s", c.stderr)
+	})
+}
+
+// wait requires a clean exit from a child that has already been signalled.
+func (c *child) wait(t *testing.T) {
+	t.Helper()
+	c.once.Do(func() {
 		require.NoError(t, c.cmd.Wait(), "child stderr: %s", c.stderr)
 	})
 }
