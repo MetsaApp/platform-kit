@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,10 +48,15 @@ func TestQueueGroupSharing(t *testing.T) {
 		_, reqErr := request(t, c, subject, "x")
 		require.NoError(t, reqErr)
 	}
-	assert.Equal(t, int64(burst), replicaA.Load()+replicaB.Load(), "the replicas split the burst")
+	// A request returns with the first answer, a replica's or the audit
+	// group's, so the other handler may still be counting its copy.
+	assert.Eventually(t, func() bool {
+		return replicaA.Load()+replicaB.Load() == burst && observer.Load() == burst
+	}, 2*time.Second, 5*time.Millisecond,
+		"the replicas split the burst (%d) and another group sees every request (%d)",
+		replicaA.Load()+replicaB.Load(), observer.Load())
 	assert.Positive(t, replicaA.Load())
 	assert.Positive(t, replicaB.Load())
-	assert.Equal(t, int64(burst), observer.Load(), "another group sees every request")
 }
 
 // The caller's trace continues in the handler: the request carries a W3C

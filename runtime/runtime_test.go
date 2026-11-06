@@ -77,7 +77,7 @@ func childMain() int {
 		// client hangs up: a request the drain must wait for.
 		mux.HandleFunc("GET /hold", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			http.NewResponseController(w).Flush() //nolint:errcheck // test-only; the client sees the headers or fails.
+			_ = http.NewResponseController(w).Flush()
 			<-r.Context().Done()
 		})
 		mux.HandleFunc("GET /work", func(_ http.ResponseWriter, r *http.Request) {
