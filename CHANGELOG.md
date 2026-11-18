@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/MetsaApp/platform-kit/compare/v0.3.0...v0.3.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **natsclient:** renew the callout credential before it expires, with nothing in flight (COR-1588) ([#11](https://github.com/MetsaApp/platform-kit/issues/11)) ([91c5ef1](https://github.com/MetsaApp/platform-kit/commit/91c5ef1bca0c1a2fac0d57b36d40c90c26d781d3))
+
 ## [0.3.0](https://github.com/MetsaApp/platform-kit/compare/v0.2.0...v0.3.0) (2026-11-18)
 
 
