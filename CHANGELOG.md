@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/MetsaApp/platform-kit/compare/v0.2.0...v0.3.0) (2026-11-18)
+
+
+### Features
+
+* **edgeauth:** verify guard's identity JWT in Go and TypeScript (COR-1076) ([#6](https://github.com/MetsaApp/platform-kit/issues/6)) ([b38e7d8](https://github.com/MetsaApp/platform-kit/commit/b38e7d8fc88d1f16aeca65f62e0f2ad09c181c37))
+
 ## [0.2.0](https://github.com/MetsaApp/platform-kit/compare/v0.1.0...v0.2.0) (2026-10-19)
 
 
