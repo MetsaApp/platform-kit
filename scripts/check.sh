@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs locally what .github/workflows/ci.yml ran on pull requests: build, vet,
-# race-enabled tests and golangci-lint. GitHub Actions CI is off, so this is
-# the only check a change gets. Stops at the first failure and exits non-zero.
+# race-enabled tests, golangci-lint and the ts/edgeauth checks. GitHub Actions
+# CI is off, so this is the only check a change gets. Stops at the first failure and exits non-zero.
 #
 # Left out: pr-title.yml checked that the PR title is a conventional commit.
 # A title only exists once the PR does, so no local step can check it; write
@@ -30,5 +30,19 @@ go test -race ./...
 
 step "golangci-lint $GOLANGCI_LINT_VERSION"
 go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION" run --allow-parallel-runners
+
+step "ts/edgeauth: deps, types, committed dist, tests under Node and Bun"
+need npm "Install Node 22 or newer: https://nodejs.org (or brew install node)"
+need bun "Install Bun: https://bun.sh (or brew install oven-sh/bun/bun)"
+(
+  cd ts/edgeauth
+  npm ci --no-audit --no-fund
+  npm run check
+  npm run typecheck
+  npm run build
+  git diff --exit-code -- dist || { echo "check.sh: ts/edgeauth/dist is stale: run npm run build there and commit it" >&2; exit 1; }
+  npm test
+  bun --bun x vitest run
+)
 
 printf '\ncheck.sh: all checks passed\n'

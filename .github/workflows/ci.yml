@@ -43,7 +43,7 @@ jobs:
   # dist/ is committed (git installs run no build), so CI checks it matches
   # the source, then runs the shared vectors under Node and under Bun.
   edgeauth-ts:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
