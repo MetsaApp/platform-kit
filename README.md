@@ -169,7 +169,7 @@ guard is down.
 |---|---|
 | no header | passes on anonymous: `FromContext` reports false |
 | valid token | passes on with the `Identity` in the context |
-| invalid token (`ErrInvalid`) | 401, logged through `WithLogger` |
+| invalid token (`ErrInvalid`), or more than one identity header | 401, logged through `WithLogger` |
 | JWKS unreachable (`ErrUnavailable`) | 503 |
 
 Responses are plain text and never echo the token. `RequireIdentity` (401

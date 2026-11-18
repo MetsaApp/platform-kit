@@ -317,6 +317,14 @@ func TestMiddleware(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), token)
 	assert.Contains(t, logs.String(), "identity token refused")
 	assert.NotContains(t, logs.String(), token)
+
+	// Two identity headers, even both valid, are refused: guard sends one,
+	// so a second is a client's copy that got past the edge.
+	r = req()
+	iss.Sign(r, ada)
+	r.Header.Add(edgeauth.Header, iss.Mint(edgeauth.Identity{Subject: "mallory"}, host))
+	rec = serve(t, v, nil, r)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestMiddlewareUnavailable(t *testing.T) {

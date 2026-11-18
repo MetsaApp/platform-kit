@@ -2,6 +2,7 @@ package edgeauth
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 )
@@ -15,12 +16,21 @@ import (
 // With echo: e.Use(echo.WrapMiddleware(v.Middleware)).
 func (v *Verifier) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get(Header) //nolint:canonicalheader // the contract names it in lower case; Get canonicalizes
-		if token == "" {
+		// The contract names the header in lower case; Values canonicalizes.
+		values := r.Header.Values(Header) //nolint:canonicalheader // see above
+		if len(values) == 0 || len(values) == 1 && values[0] == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		id, err := v.Verify(r.Context(), token)
+		var id Identity
+		var err error
+		if len(values) > 1 {
+			// Guard sends one value. A second one means a client's copy got
+			// past the edge: refuse rather than pick one.
+			err = fmt.Errorf("%w: %d %s headers", ErrInvalid, len(values), Header)
+		} else {
+			id, err = v.Verify(r.Context(), values[0])
+		}
 		if err != nil {
 			attrs := []any{
 				slog.String("host", r.Host),
