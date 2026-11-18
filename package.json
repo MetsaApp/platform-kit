@@ -1,6 +1,6 @@
 {
   "name": "@metsaapp/edgeauth",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "description": "Verifies guard's identity JWT (x-bastion-identity); the TypeScript twin of github.com/MetsaApp/platform-kit/edgeauth.",
   "license": "MIT",
