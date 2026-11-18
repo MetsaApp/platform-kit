@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/nats-io/nats.go/micro"
 	"go.opentelemetry.io/otel/attribute"
@@ -53,29 +54,71 @@ func WithQueueGroup(name string) EndpointOption {
 // Service is a set of request/reply endpoints under one service name. It is
 // a nats.go micro service, so it also answers the $SRV.PING, $SRV.INFO and
 // $SRV.STATS discovery subjects, which the nats CLI's "micro" commands read.
+//
+// A credential renewal stops the micro service and registers it again with
+// the same endpoints (see WithCredentialRenewal), so its ID and endpoint
+// stats start over once an hour.
 type Service struct {
-	micro  micro.Service
-	name   string
-	client *Client
-	log    *slog.Logger
+	name    string
+	version string
+	client  *Client
+	log     *slog.Logger
+
+	mu        sync.Mutex
+	micro     micro.Service // nil while paused
+	endpoints []endpoint
+	stopped   bool
+}
+
+// endpoint is what AddEndpoint registered, kept to register it again.
+type endpoint struct {
+	name    string
+	subject string
+	queue   string
+	handler micro.HandlerFunc
 }
 
 // Service registers a micro service named name at version (SemVer) on the
 // connection. Endpoints are added with AddEndpoint; Stop drains them.
 func (c *Client) Service(name, version string) (*Service, error) {
-	log := c.log.With("nats_service", name)
-	svc, err := micro.AddService(c.nc, micro.Config{
-		Name:       name,
-		Version:    version,
-		QueueGroup: name,
+	s := &Service{name: name, version: version, client: c, log: c.log.With("nats_service", name)}
+	m, err := s.start()
+	if err != nil {
+		return nil, err
+	}
+	s.micro = m
+	c.addService(s)
+	return s, nil
+}
+
+// start adds the micro service and every endpoint registered so far.
+func (s *Service) start() (micro.Service, error) {
+	m, err := micro.AddService(s.client.nc, micro.Config{
+		Name:       s.name,
+		Version:    s.version,
+		QueueGroup: s.name,
 		ErrorHandler: func(_ micro.Service, natsErr *micro.NATSError) {
-			log.Warn("nats service error", "subject", natsErr.Subject, "error", natsErr.Description)
+			s.log.Warn("nats service error", "subject", natsErr.Subject, "error", natsErr.Description)
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("natsclient: add service %s: %w", name, err)
+		return nil, fmt.Errorf("natsclient: add service %s: %w", s.name, err)
 	}
-	return &Service{micro: svc, name: name, client: c, log: log}, nil
+	for _, e := range s.endpoints {
+		if err = addEndpoint(m, e); err != nil {
+			_ = m.Stop()
+			return nil, err
+		}
+	}
+	return m, nil
+}
+
+func addEndpoint(m micro.Service, e endpoint) error {
+	err := m.AddEndpoint(e.name, e.handler, micro.WithEndpointSubject(e.subject), micro.WithEndpointQueueGroup(e.queue))
+	if err != nil {
+		return fmt.Errorf("natsclient: add endpoint %s: %w", e.subject, err)
+	}
+	return nil
 }
 
 // AddEndpoint serves EndpointSubject(service, endpoint) with handler, in
@@ -83,26 +126,70 @@ func (c *Client) Service(name, version string) (*Service, error) {
 // to one endpoint are handled one at a time, in order, as nats.go delivers
 // them; a slow handler is throttled by its own subscription, not the
 // service's others.
-func (s *Service) AddEndpoint(endpoint string, handler Handler, opts ...EndpointOption) error {
+func (s *Service) AddEndpoint(name string, handler Handler, opts ...EndpointOption) error {
 	o := endpointOptions{queueGroup: s.name}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	subject := EndpointSubject(s.name, endpoint)
-	err := s.micro.AddEndpoint(endpoint, micro.HandlerFunc(s.handle(subject, handler)),
-		micro.WithEndpointSubject(subject), micro.WithEndpointQueueGroup(o.queueGroup))
-	if err != nil {
-		return fmt.Errorf("natsclient: add endpoint %s: %w", subject, err)
+	subject := EndpointSubject(s.name, name)
+	e := endpoint{name: name, subject: subject, queue: o.queueGroup, handler: s.handle(subject, handler)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.micro != nil {
+		if err := addEndpoint(s.micro, e); err != nil {
+			return err
+		}
 	}
+	s.endpoints = append(s.endpoints, e)
 	return nil
 }
 
 // Stop drains the endpoint subscriptions and answers no more requests.
 func (s *Service) Stop() error {
-	if err := s.micro.Stop(); err != nil {
+	s.client.removeService(s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+	if s.micro == nil {
+		return nil
+	}
+	m := s.micro
+	s.micro = nil
+	if err := m.Stop(); err != nil {
 		return fmt.Errorf("natsclient: stop service %s: %w", s.name, err)
 	}
 	return nil
+}
+
+// pause drains the endpoints for a renewal: the server sends them no more
+// requests, and the handlers answer the ones already delivered.
+func (s *Service) pause() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.micro == nil {
+		return
+	}
+	if err := s.micro.Stop(); err != nil {
+		s.log.Warn("nats renewal: service not drained", "error", err)
+	}
+	s.micro = nil
+}
+
+// resume registers the service again after a renewal.
+func (s *Service) resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped || s.micro != nil {
+		return
+	}
+	m, err := s.start()
+	if err != nil {
+		// The service answers nothing until the process restarts: an
+		// Error, like a closed connection.
+		s.log.Error("nats renewal: service not registered again", "error", err)
+		return
+	}
+	s.micro = m
 }
 
 // handle wraps handler for micro: it continues the caller's trace from the
@@ -110,6 +197,9 @@ func (s *Service) Stop() error {
 // error response.
 func (s *Service) handle(subject string, handler Handler) func(micro.Request) {
 	return func(req micro.Request) {
+		s.client.started.Add(1)
+		s.client.handlers.Add(1)
+		defer s.client.handlers.Add(-1)
 		ctx := s.client.propagator.Extract(context.Background(), propagation.HeaderCarrier(req.Headers()))
 		ctx, span := s.client.tracer.Start(ctx, subject,
 			trace.WithSpanKind(trace.SpanKindServer),

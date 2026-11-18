@@ -59,6 +59,7 @@ type Option func(*options)
 type options struct {
 	sharedInbox bool
 	natsOpts    []nats.Option
+	renewAfter  *time.Duration
 }
 
 // WithSharedInbox keeps nats.go's default _INBOX prefix instead of the
@@ -93,6 +94,8 @@ func InboxPrefix(identity string) (string, error) {
 // Client is one process's connection to NATS and the instruments its
 // requests record into.
 type Client struct {
+	renewal
+
 	nc         *nats.Conn
 	log        *slog.Logger
 	service    string
@@ -117,6 +120,10 @@ type Client struct {
 // since that one is permanent and the process should exit. A nil log
 // discards.
 //
+// With a TokenFile, the client also renews its credential before the
+// callout's expires (see WithCredentialRenewal), so the hourly expiry does
+// not cut off a request in flight.
+//
 // The reply inbox is the identity's private prefix (see InboxPrefix) unless
 // WithSharedInbox says otherwise.
 func Connect(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Client, error) {
@@ -130,7 +137,9 @@ func Connect(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) 
 	for _, opt := range opts {
 		opt(&o)
 	}
-	natsOpts := connectOptions(cfg, log)
+	c := &Client{log: log, service: cfg.ServiceName, tracer: otel.Tracer(scope), propagator: propagation.TraceContext{}}
+	c.renewAfter = renewAfter(cfg, o)
+	natsOpts := connectOptions(cfg, log, c.armRenewal)
 	inbox := "_INBOX"
 	if !o.sharedInbox {
 		prefix, err := InboxPrefix(cfg.Identity)
@@ -141,7 +150,6 @@ func Connect(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) 
 		natsOpts = append(natsOpts, nats.CustomInboxPrefix(prefix))
 	}
 
-	c := &Client{log: log, service: cfg.ServiceName, tracer: otel.Tracer(scope), propagator: propagation.TraceContext{}}
 	if err := c.initInstruments(); err != nil {
 		return nil, err
 	}
@@ -149,7 +157,9 @@ func Connect(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) 
 	if err != nil {
 		return nil, fmt.Errorf("natsclient: connect: %w", err)
 	}
+	c.mu.Lock() // the renewal timer reads it
 	c.nc = nc
+	c.mu.Unlock()
 	log.InfoContext(ctx, "nats connecting", "url", cfg.URL, "identity", cfg.Identity, "inbox", inbox)
 	return c, nil
 }
@@ -157,7 +167,9 @@ func Connect(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) 
 // connectOptions is Connect's nats.go configuration. It is built outside
 // Connect so the callbacks, which run for the life of the connection, do not
 // close over Connect's context.
-func connectOptions(cfg Config, log *slog.Logger) []nats.Option {
+//
+// connected runs on the initial connect and on every reconnect.
+func connectOptions(cfg Config, log *slog.Logger, connected func()) []nats.Option {
 	opts := []nats.Option{
 		nats.Name(cfg.ServiceName),
 		nats.MaxReconnects(-1),
@@ -168,8 +180,10 @@ func connectOptions(cfg Config, log *slog.Logger) []nats.Option {
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			log.Info("nats disconnected, reconnecting", "error", err, "server", nc.ConnectedUrl())
 		}),
+		nats.ConnectHandler(func(*nats.Conn) { connected() }),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Info("nats reconnected", "server", nc.ConnectedUrl())
+			connected()
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
 			log.Error("nats connection closed for good", "error", nc.LastError())
@@ -248,6 +262,7 @@ func (c *Client) Connected() func(context.Context) error {
 // done, whichever comes first, so a SIGTERM handler waits for the work drain
 // was meant to save rather than exiting on Drain's return.
 func (c *Client) Drain(ctx context.Context) error {
+	c.stopRenewal()
 	closed := make(chan struct{})
 	c.nc.SetClosedHandler(func(*nats.Conn) { close(closed) })
 	if c.nc.IsClosed() {

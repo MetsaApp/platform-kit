@@ -80,7 +80,12 @@ func (c *Client) Request(ctx context.Context, subject string, data []byte, hdr n
 	c.propagator.Inject(ctx, propagation.HeaderCarrier(msg.Header))
 
 	start := time.Now()
-	reply, err := c.nc.RequestMsgWithContext(ctx, msg)
+	var reply *nats.Msg
+	err := c.gate.enter(ctx)
+	if err == nil {
+		reply, err = c.nc.RequestMsgWithContext(ctx, msg)
+		c.gate.leave()
+	}
 	outcome, err := classify(subject, reply, err)
 	elapsed := time.Since(start)
 
