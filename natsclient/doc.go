@@ -3,8 +3,10 @@
 //
 //   - Connect dials with the projected token and the service's identity,
 //     re-reads the token on every (re)connect, reconnects forever, logs
-//     every connection event and gives the identity a private reply inbox
-//     (_INBOX_<ns>_<sa>) so no other identity can read its replies;
+//     every connection event, gives the identity a private reply inbox
+//     (_INBOX_<ns>_<sa>) so no other identity can read its replies, and
+//     renews the callout's hourly credential before it expires, with
+//     nothing in flight, so no reply is lost to the expiry;
 //   - Request is a synchronous call with a deadline, W3C trace context in the
 //     headers, and distinct errors for "nobody serves this subject"
 //     (ErrNoResponders) and "the deadline passed" (ErrTimeout), counted and

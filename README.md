@@ -104,6 +104,14 @@ request. The connection re-reads the token on every (re)connect, reconnects
 forever, is named after the service, and logs every connection event: the
 hourly credential expiry at Info, a closed connection at Error.
 
+The callout's credential lasts an hour, and a reply to a request that arrived
+on a connection the server has since closed is lost: the response permission
+belongs to the old connection. So a client with a token file renews its
+credential 50 minutes after each (re)connect: it drains its services (the
+queue group's other replicas answer meanwhile), waits for its own requests in
+flight, reconnects with a fresh credential and registers the services again.
+`WithCredentialRenewal(d)` changes the interval, and `0` turns it off.
+
 Replies arrive on a private inbox, `_INBOX_<ns>_<sa>` from `SERVICE_IDENTITY`
 with dots turned into `_`, which the auth callout grants to that identity
 alone. Until the grant is issued (ENG-447) an identity requests with
